@@ -1,3 +1,4 @@
+import { formatCommand } from '../shared/commandLine';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification } from 'electron';
 import { spawn } from 'node:child_process';
 import {
@@ -95,7 +96,7 @@ import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { parseHireDeepLink, type HireManifest } from '../shared/hire';
 import { ClosingTimeController } from './closingTime';
 import {
-  argsWithAutoModeFlag,
+  buildProviderLaunchArgs,
   inferAgentProvider,
   isClaudeProvider,
   nonInteractiveEnvForProvider,
@@ -3110,11 +3111,18 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // Which CLI is this? Explicit wins; else inferred from the binary
   // (claude/codex/grok/agy). Non-Claude providers skip every Claude-only spawn step
   // below. Persist the resolved provider onto opts (+ hive meta) so the registry
-  // record and downstream provider-aware steps agree on one value.
-  const provider = inferAgentProvider(opts.command, opts.provider ?? opts.hive?.provider);
+  // record and downstream provider-aware steps agree on one value. command is
+  // already one executable, so quote it for inference rather than splitting a
+  // path with spaces a second time.
+  const provider = inferAgentProvider(formatCommand([opts.command]), opts.provider ?? opts.hive?.provider);
   const claudeProvider = isClaudeProvider(provider);
   opts.provider = provider;
   if (opts.hive) opts.hive = { ...opts.hive, provider };
+  // Apply the same defaults to fresh, restored and main-only agent launches,
+  // before adding any provider's identity prompt or resume arguments.
+  if (opts.hive) {
+    opts.args = buildProviderLaunchArgs(provider, opts.args ?? [], { autoMode: readConfig().autoMode });
+  }
   // Activation-funnel entry (v0.4.6): every spawn REQUEST, so (attempted − spawned)
   // measures the fallout the whole rebuild exists to see. Gated on !noAutoInstall so
   // the missing-CLI relaunch (the only re-entry, index.ts install-exit handler) does
@@ -3136,7 +3144,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // this id, so when the install PTY exits teardownPty is a harmless no-op (the agent
   // isn't archived and no worktree is torn down) before the relaunch takes over.
   {
-    const bin = opts.command.trim().split(/\s+/)[0] || opts.command;
+    const bin = opts.command;
     if (bin && !opts.noAutoInstall && !ptyManager.isCommandAvailable(bin)) {
       // The installer commands are `npm install -g …`. Probe for npm the same way
       // we probe for the engine CLI, so a no-Node machine gets the node-free rung
@@ -3332,30 +3340,12 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // in the command string the renderer already built.
   if (opts.hive && claudeProvider) {
     const cfg = readConfig();
-    // Permission posture (D9): only a GUI hire (Add Agent) builds its command
-    // through buildSpawnCommand, which bakes autoMode's bypass flag into the
-    // command STRING before this function ever sees it. A main-only spawn (the
-    // ephemeral-worker watcher, a voice hire) skips that step entirely, so it
-    // previously reached here with neither the flag nor any equivalent — every
-    // other Claude spawn path got the user's autoMode posture and this one
-    // didn't. argsWithAutoModeFlag is idempotent (a GUI spawn's args already has
-    // the flag, so this is a no-op for it) and is the SAME check spawnAgentCore
-    // already applies for opencode/crush et al a few lines below via
-    // HIVE_AUTO_APPROVE — one global toggle, one posture, every spawn path.
-    // Confirmed live: a worker spawned without this flag deadlocked — a
-    // cross-session message to it came back "held for the recipient user's
-    // approval" with no surface for anyone to ever grant that approval.
-    const args = argsWithAutoModeFlag(opts.args ?? [], cfg.autoMode, provider);
-    // Model precedence: an explicit per-agent --model (from the renderer) wins;
-    // else the user's global defaultModel; else the role-based default tier. The
-    // GOD is special-cased: it has its own engine config (godProvider/godModel), so
-    // modelForRole resolves it and that wins over the worker-oriented defaultModel.
-    if (!args.includes('--model')) {
-      const m = opts.hive.isGod
-        ? modelForRole(opts.hive, cfg)
-        : cfg.defaultModel ?? modelForRole(opts.hive, cfg);
-      if (m) args.push('--model', m);
-    }
+    // Preserve the existing Claude role/default-model precedence. The shared
+    // builder also recognizes an explicit --model=value from a restored command.
+    const model = opts.hive.isGod
+      ? modelForRole(opts.hive, cfg)
+      : cfg.defaultModel ?? modelForRole(opts.hive, cfg);
+    const args = buildProviderLaunchArgs(provider, opts.args ?? [], { model, autoMode: cfg.autoMode });
     // A model newer than the installed Claude Code (Opus 5.5 needs 2.1.280+)
     // would be rejected and the agent would never start. Swap it for the
     // newest model this CLI knows. Applies to every Claude agent, whichever
@@ -3364,7 +3354,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       const at = args.findIndex((a) => a === '--model' || a.startsWith('--model='));
       const requested = at < 0 ? undefined : args[at] === '--model' ? args[at + 1] : args[at].slice('--model='.length);
       if (requested && CLAUDE_MODEL_CLI_FLOOR[requested]) {
-        const bin = opts.command.trim().split(/\s+/)[0] || opts.command;
+        const bin = opts.command;
         const pick = modelForCli(requested, await claudeCliVersion(ptyManager.commandPath(bin)));
         if (pick.downgraded) {
           if (args[at] === '--model') args[at + 1] = pick.model; else args[at] = `--model=${pick.model}`;
@@ -3580,7 +3570,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // Record the Claude Code version this agent starts on, only once its terminal
   // is really running: a failed spawn must not count as an agent to upgrade.
   if (res.ok && opts.hive?.id && claudeProvider) {
-    const binPath = ptyManager.commandPath(opts.command.trim().split(/\s+/)[0] || opts.command);
+    const binPath = ptyManager.commandPath(opts.command);
     void claudeCliVersion(binPath).then((started) => {
       if (!binPath || !started || !ptyToAgent.has(opts.id)) return;
       ptyCli.set(opts.id, { bin: binPath, started });

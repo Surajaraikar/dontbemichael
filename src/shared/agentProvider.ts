@@ -16,6 +16,7 @@ import type { CmdGroup } from './claudeCommands';
 import { COMMAND_GROUPS as CLAUDE_COMMAND_GROUPS } from './claudeCommands';
 import { CODEX_COMMAND_GROUPS } from './codexCommands';
 import { GROK_COMMAND_GROUPS } from './grokCommands';
+import { appendCommandOptions, hasCommandOption, tokenizeCommand } from './commandLine';
 
 // NOTE: 'claw' (claw-code) was removed as a selectable provider — its upstream is
 // an unmaintained "museum exhibit" repo, not a production CLI. Re-add a supported
@@ -161,8 +162,8 @@ export interface AgentProviderPreset {
   nativeInstallCommand?: { posix: string; win32: string };
   /** Optional docs URL surfaced as a manual-setup hint in the missing-CLI banner. */
   docsUrl?: string;
-  /** Extra argv tokens that count as an explicit permission stance (so the auto
-   *  flag is not appended). Defaults to the auto flag's own leading token. */
+  /** Extra option names that count as an explicit permission stance (so the
+   *  auto flags are not appended), in addition to the auto flags themselves. */
   autoStanceTokens?: string[];
   resumeSubcommand?: string; // CLIs that resume via a subcommand instead of a flag (Codex: `codex resume [OPTIONS] [SESSION_ID]`)
 }
@@ -194,6 +195,7 @@ export const AGENT_PROVIDER_PRESETS: AgentProviderPreset[] = [
     supportsModel: true,
     modelFlag: '--model',
     autoFlag: '--permission-mode bypassPermissions',
+    autoStanceTokens: ['--dangerously-skip-permissions'],
     hiveAware: true,
     canReceiveInbox: true,
     // The newest Opus, and Claude Code's own default on every paid plan. It has
@@ -312,6 +314,7 @@ export const AGENT_PROVIDER_PRESETS: AgentProviderPreset[] = [
     // `--yolo` is deprecated upstream; approval-mode is the current spelling.
     autoModeFlag: '--approval-mode=yolo',
     autoFlag: '--approval-mode=yolo',
+    autoStanceTokens: ['--yolo'],
     supportsModel: true,
     modelFlag: '--model',
     hiveAware: false,
@@ -640,7 +643,7 @@ export function canReceiveInbox(provider: AgentProvider | undefined): boolean {
 
 /** The bare executable from a command string ('agy --model x' → 'agy'). */
 function commandBinary(command: string | undefined): string {
-  const first = (command ?? '').trim().split(/\s+/)[0] ?? '';
+  const first = tokenizeCommand(command ?? '')[0] ?? '';
   // strip a path + extension so 'C:\...\agy.exe' and '/usr/bin/claude' both map
   const leaf = first.split(/[\\/]/).pop() ?? first;
   return leaf.replace(/\.(exe|cmd|bat|ps1)$/i, '').toLowerCase();
@@ -704,18 +707,32 @@ export function argsWithAutoModeFlag(args: string[], autoMode: boolean, provider
   const flag = autoModeFlagForProvider(provider);
   if (!flag) return args;
   if (hasAutoModeStance(args, provider)) return args;
-  return [...args, ...flag.trim().split(/\s+/)];
+  return appendCommandOptions(args, tokenizeCommand(flag));
 }
 
-/** True when argv already states a permission posture for this provider: the
- *  auto flag's leading token, or any of the preset's `autoStanceTokens`. Token
- *  match, not substring — copilot's flag starts with `-s`. */
+/** Preserve an explicit stance, including any already supplied part of the
+ *  preset's automatic flags. Match option names, never arbitrary substrings. */
 export function hasAutoModeStance(args: string[], provider: AgentProvider): boolean {
   const preset = providerPreset(provider);
   const flag = preset.autoModeFlag ?? '';
-  const lead = flag.trim().split(/\s+/)[0];
-  const stance = new Set([...(lead ? [lead] : []), ...(preset.autoStanceTokens ?? [])]);
-  return args.some((a) => stance.has(a));
+  const defaults = tokenizeCommand(flag).filter((token) => token.startsWith('-'));
+  const stance = new Set([...defaults, ...(preset.autoStanceTokens ?? [])]);
+  return [...stance].some((token) => hasCommandOption(args, token));
+}
+
+/** Common launch defaults only. Session resume, identity and environment stay
+ *  with the main process. Explicit options (including --flag=value) always win. */
+export function buildProviderLaunchArgs(
+  provider: AgentProvider,
+  existingArgs: readonly string[],
+  options: { model?: string; autoMode: boolean }
+): string[] {
+  const preset = providerPreset(provider);
+  let args = [...existingArgs];
+  if (preset.supportsModel && preset.modelFlag && options.model && !hasCommandOption(args, preset.modelFlag)) {
+    args = appendCommandOptions(args, [preset.modelFlag, options.model]);
+  }
+  return argsWithAutoModeFlag(args, options.autoMode, provider);
 }
 
 /** Returns any env vars the provider needs for non-interactive / first-run suppression. */

@@ -7,11 +7,13 @@ import {
   AGENT_PROVIDER_PRESETS,
   BUILD_ENGINES,
   providerPreset,
+  buildProviderLaunchArgs,
   inferAgentProvider,
   isClaudeProvider,
   type AgentProvider,
   type AgentProviderPreset
 } from '@shared/agentProvider';
+import { formatCommand, tokenizeCommand } from '@shared/commandLine';
 import type {
   ContextTriggerConfig,
   OrgTriggerConfig,
@@ -512,16 +514,7 @@ export function buildSpawnCommand(
       : provider === 'custom'
         ? config.defaultCommand || ''
         : preset.defaultCommand;
-  let cmd = base;
-  if (preset.supportsModel && model && preset.modelFlag) {
-    // Quote model values that contain whitespace (agy labels like
-    // "Gemini 3.1 Pro (High)") so the command tokenizer keeps them one arg.
-    const m = /\s/.test(model) ? `"${model}"` : model;
-    cmd = `${cmd} ${preset.modelFlag} ${m}`;
-  }
-  // Auto (skip-permissions) mode appends each provider's own flag — Claude's
-  // bypassPermissions, Codex's dangerous bypass, Grok's always-approve, Kimi's
-  // auto, or agy's skip flag.
-  if (config.autoMode && preset.autoFlag) cmd = `${cmd} ${preset.autoFlag}`;
-  return cmd;
+  const [bin, ...args] = tokenizeCommand(base);
+  if (!bin) return base;
+  return formatCommand([bin, ...buildProviderLaunchArgs(provider, args, { model, autoMode: config.autoMode })]);
 }

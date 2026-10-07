@@ -1,3 +1,4 @@
+import { tokenizeCommand } from '../shared/commandLine';
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -93,7 +94,7 @@ export function runHiddenClaude(prompt: string, opts: HiddenClaudeOptions): Prom
     }
     opts = { ...opts, cwd };
 
-    const binary = (opts.command || 'claude').trim().split(/\s+/)[0] || 'claude';
+    const binary = tokenizeCommand(opts.command || 'claude')[0] || 'claude';
     const exe = resolveCommand(binary);
     const disallowed = opts.disallowedTools ?? ['Edit', 'Write', 'NotebookEdit'];
     const addDirs = (opts.addDirs ?? []).filter((d) => d && existsSync(d));

@@ -61,7 +61,7 @@ test('reads the version out of claude --version', () => {
 
 test('every Claude hive spawn applies the floor after choosing the model', () => {
   const src = fs.readFileSync(path.resolve(__dirname, '../src/main/index.ts'), 'utf8');
-  const pushed = src.indexOf("if (m) args.push('--model', m);");
+  const pushed = src.indexOf('const args = buildProviderLaunchArgs(provider, opts.args ?? [], { model, autoMode: cfg.autoMode });');
   const floor = src.indexOf('modelForCli(requested, await claudeCliVersion(');
   assert.ok(pushed > 0 && floor > pushed, 'the floor must run after the model is resolved');
   assert.ok(floor - pushed < 1500, 'and in the same spawn block');
